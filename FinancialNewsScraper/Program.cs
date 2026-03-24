@@ -77,17 +77,26 @@ public static class Program
         {
             _isUpdating = true;
             SeenTitles.Clear();
-            LatestNews.Clear();
+
+            // Scrape in un buffer temporaneo, così la pagina mostra sempre le ultime notizie
+            var tempNews = new ConcurrentDictionary<string, List<NewsItem>>();
+            var originalNews = LatestNews;
 
             Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Aggiornamento in corso...");
-            await ScrapeAllAsync(browser, cts.Token);
+            await ScrapeAllAsync(browser, cts.Token, tempNews);
+
+            // Aggiorna le notizie solo a scraping completato
+            LatestNews.Clear();
+            foreach (var kv in tempNews)
+                LatestNews[kv.Key] = kv.Value;
+
             _lastUpdate = DateTime.Now;
             _isUpdating = false;
 
             Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Completato - {LatestNews.Values.Sum(l => l.Count)} notizie totali");
-            Console.WriteLine($"Pagina: http://localhost:5050\n");
+            Console.WriteLine($"Pagina: http://localhost:{port}\n");
 
-            try { await Task.Delay(TimeSpan.FromMinutes(30), cts.Token); }
+            try { await Task.Delay(TimeSpan.FromMinutes(10), cts.Token); }
             catch (TaskCanceledException) { break; }
         }
 
@@ -98,7 +107,7 @@ public static class Program
     //  Scraping
     // ================================================================
 
-    private static async Task ScrapeAllAsync(IBrowser browser, CancellationToken ct)
+    private static async Task ScrapeAllAsync(IBrowser browser, CancellationToken ct, ConcurrentDictionary<string, List<NewsItem>> target)
     {
         // == BROWSER SCRAPERS (priorità) ==
         var browserScrapers = new (string Name, string Url, string CssSelector)[]
@@ -133,7 +142,7 @@ public static class Program
             try
             {
                 var news = await ScrapeBrowserAsync(browser, name, url, selector);
-                LatestNews[$"[BROWSER] {name}"] = news;
+                target[$"[BROWSER] {name}"] = news;
                 PrintSection($"[BROWSER] {name}", news);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -146,7 +155,7 @@ public static class Program
         try
         {
             var news = await ScrapeFinvizAsync(ct);
-            LatestNews["[HTML] Finviz"] = news;
+            target["[HTML] Finviz"] = news;
             PrintSection("[HTML] Finviz", news);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -170,7 +179,7 @@ public static class Program
             try
             {
                 var news = await FetchRssFeedAsync(name, url, ct);
-                LatestNews[$"[RSS] {name}"] = news;
+                target[$"[RSS] {name}"] = news;
                 PrintSection($"[RSS] {name}", news);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -456,14 +465,12 @@ public static class Program
             </div>
             </div>
             <script>
-              let sec = 1800;
+              let sec = 60;
               const cd = document.getElementById('cd');
               setInterval(() => {
                 sec--;
                 if (sec <= 0) { location.reload(); return; }
-                const m = Math.floor(sec / 60);
-                const s = sec % 60;
-                cd.textContent = 'Refresh tra ' + m + 'm ' + s.toString().padStart(2,'0') + 's';
+                cd.textContent = 'Refresh tra ' + sec + 's';
               }, 1000);
             </script>
             </body>
