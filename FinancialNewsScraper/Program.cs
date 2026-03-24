@@ -87,7 +87,7 @@ public static class Program
             Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Completato - {LatestNews.Values.Sum(l => l.Count)} notizie totali");
             Console.WriteLine($"Pagina: http://localhost:5050\n");
 
-            try { await Task.Delay(TimeSpan.FromSeconds(60), cts.Token); }
+            try { await Task.Delay(TimeSpan.FromMinutes(30), cts.Token); }
             catch (TaskCanceledException) { break; }
         }
 
@@ -456,12 +456,14 @@ public static class Program
             </div>
             </div>
             <script>
-              let sec = 30;
+              let sec = 1800;
               const cd = document.getElementById('cd');
               setInterval(() => {
                 sec--;
                 if (sec <= 0) { location.reload(); return; }
-                cd.textContent = 'Refresh tra ' + sec + 's';
+                const m = Math.floor(sec / 60);
+                const s = sec % 60;
+                cd.textContent = 'Refresh tra ' + m + 'm ' + s.toString().padStart(2,'0') + 's';
               }, 1000);
             </script>
             </body>
