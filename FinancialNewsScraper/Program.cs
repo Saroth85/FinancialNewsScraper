@@ -40,6 +40,8 @@ public static class Program
     private static readonly ConcurrentDictionary<string, List<NewsItem>> LatestNews = new();
     private static DateTime _lastUpdate = DateTime.MinValue;
     private static bool _isUpdating;
+    private static readonly TimeZoneInfo ItalyTz = TimeZoneInfo.FindSystemTimeZoneById(OperatingSystem.IsWindows() ? "W. Europe Standard Time" : "Europe/Rome");
+    private static DateTime ItalyNow => TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, ItalyTz);
 
     static Program()
     {
@@ -82,7 +84,7 @@ public static class Program
             var tempNews = new ConcurrentDictionary<string, List<NewsItem>>();
             var originalNews = LatestNews;
 
-            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Aggiornamento in corso...");
+            Console.WriteLine($"[{ItalyNow:HH:mm:ss}] Aggiornamento in corso...");
             await ScrapeAllAsync(browser, cts.Token, tempNews);
 
             // Aggiorna le notizie solo a scraping completato
@@ -90,10 +92,10 @@ public static class Program
             foreach (var kv in tempNews)
                 LatestNews[kv.Key] = kv.Value;
 
-            _lastUpdate = DateTime.Now;
+            _lastUpdate = ItalyNow;
             _isUpdating = false;
 
-            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Completato - {LatestNews.Values.Sum(l => l.Count)} notizie totali");
+            Console.WriteLine($"[{ItalyNow:HH:mm:ss}] Completato - {LatestNews.Values.Sum(l => l.Count)} notizie totali");
             Console.WriteLine($"Pagina: http://localhost:{port}\n");
 
             try { await Task.Delay(TimeSpan.FromMinutes(10), cts.Token); }
@@ -208,7 +210,7 @@ public static class Program
             if (!IsValidFinanceTitle(title, description)) continue;
             if (!SeenTitles.Add(NormalizeForDedup(title))) continue;
 
-            items.Add(new NewsItem(source, title, link, DateTime.Now));
+            items.Add(new NewsItem(source, title, link, ItalyNow));
             if (items.Count >= 10) break;
         }
         return items;
@@ -249,7 +251,7 @@ public static class Program
             var href = node.GetAttributeValue("href", "");
             if (!IsValidFinanceTitle(title, "")) continue;
             if (!SeenTitles.Add(NormalizeForDedup(title))) continue;
-            items.Add(new NewsItem("Finviz", title, href, DateTime.Now));
+            items.Add(new NewsItem("Finviz", title, href, ItalyNow));
             if (items.Count >= 10) break;
         }
         return items;
@@ -293,7 +295,7 @@ public static class Program
                 }
                 if (!IsValidFinanceTitle(title, "")) continue;
                 if (!SeenTitles.Add(NormalizeForDedup(title))) continue;
-                items.Add(new NewsItem(source, title, href, DateTime.Now));
+                items.Add(new NewsItem(source, title, href, ItalyNow));
                 if (items.Count >= 10) break;
             }
             return items;
