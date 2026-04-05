@@ -74,12 +74,15 @@ Feed usati come backup, inclusi proxy via Google News per siti che bloccano l'ac
 - **Microsoft.Playwright** per scraping headless con Chromium
 - **HtmlAgilityPack** per HTML parsing (Finviz)
 - **System.Xml.Linq** per parsing RSS/XML
-- **Docker** con immagine `mcr.microsoft.com/playwright/dotnet`
+- **Ollama** con modello **phi3** per analisi AI (sentiment, riassunti, briefing)
+- **SQLite** via Entity Framework Core per persistenza dati
+- **Docker** — unico container all-in-one (app + Ollama + Playwright)
 
 ## Requisiti
 
 - .NET 8.0 SDK
 - Playwright browsers: `pwsh bin/Debug/net8.0/playwright.ps1 install chromium`
+- (Opzionale) Ollama installato localmente per AI: `curl -fsSL https://ollama.com/install.sh | bash && ollama pull phi3`
 
 ## Esecuzione locale
 
@@ -91,42 +94,82 @@ dotnet run --project FinancialNewsScraper
 
 La dashboard sarà disponibile su `http://localhost:5050`.
 
-## Docker
+## Docker (locale)
 
 ```bash
 docker build -t financial-news-scraper .
 docker run -p 8080:8080 financial-news-scraper
 ```
 
-La dashboard sarà disponibile su `http://localhost:8080`.
+Il container include Ollama + phi3 — tutto in uno. La dashboard sarà disponibile su `http://localhost:8080`.
 
 ## Deploy su Railway
 
+Container unico all-in-one: .NET app + Playwright + Ollama + phi3 — nessun servizio esterno richiesto.
+
+### Setup
+
 1. Push del codice su GitHub
 2. Vai su [railway.app](https://railway.app) → **New Project** → **Deploy from GitHub Repo**
-3. Railway rileva il Dockerfile e fa build + deploy automatico
+3. Railway rileva il `Dockerfile` e il `railway.toml`, fa build + deploy automatico
 4. In **Settings → Networking → Generate Domain** ottieni l'URL pubblico
 
-Il deploy automatico viene triggerato ad ogni push su `main` tramite GitHub Actions (`.github/workflows/deploy.yml`).
+### Volume persistente (consigliato)
+
+Aggiungi un volume dal dashboard Railway per evitare di riscaricare il modello AI ad ogni deploy:
+
+- **Mount path**: `/root/.ollama`
+- **Size**: 5GB (sufficiente per phi3)
+
+### Piano consigliato
+
+| Piano | RAM | Compatibilità | Note |
+|-------|-----|---------------|------|
+| Hobby ($5/mese) | 8GB | ✅ Funziona | Ottimizzazioni memoria attive |
+| Pro | 32GB | ✅ Ideale | Nessun limite pratico |
+
+Il piano Hobby funziona grazie alle ottimizzazioni memoria nel Dockerfile (`OLLAMA_NUM_PARALLEL=1`, `OLLAMA_KEEP_ALIVE=60`, `DOTNET_GCHeapHardLimit=256MB`).
+
+### Primo deploy
+
+Al primo avvio il container scarica il modello phi3 (~2.3GB). Questo richiede qualche minuto in più. L'healthcheck ha un timeout di 300s per gestire questa fase. I deploy successivi saranno veloci se il volume è configurato.
 
 ## Variabili d'ambiente
 
 | Variabile | Default | Descrizione |
 |-----------|---------|-------------|
-| `PORT` | `5050` | Porta del web server |
+| `PORT` | `8080` | Porta del web server (Railway la sovrascrive automaticamente) |
+| `AI_PROVIDER` | `ollama` | Provider AI: `ollama` o `openai` |
+| `AI_MODEL` | `phi3` | Modello AI da usare |
+| `OLLAMA_URL` | `http://localhost:11434` | URL di Ollama (interno al container) |
+| `OPENAI_API_KEY` | — | Chiave API OpenAI (solo se `AI_PROVIDER=openai`) |
+
+### Modelli AI alternativi
+
+Se la RAM è un problema, puoi cambiare modello via la variabile `AI_MODEL`:
+
+| Modello | Parametri | RAM | Qualità |
+|---------|-----------|-----|---------|
+| `phi3` | 3.8B | ~3.5GB | ⭐⭐⭐ Buona (default) |
+| `gemma:2b` | 2B | ~2GB | ⭐⭐ Discreta |
+| `qwen2:0.5b` | 0.5B | ~500MB | ⭐ Base |
 
 ## Struttura progetto
 
 ```
 FinancialNewsScraper/
-├── .github/workflows/deploy.yml   # CI/CD per Railway
-├── .dockerignore
-├── .gitignore
-├── Dockerfile
+├── Dockerfile                      # Build multi-stage, all-in-one con Ollama
+├── entrypoint.sh                   # Avvia Ollama + pull modello + app .NET
+├── railway.toml                    # Config deploy Railway
 ├── FinancialNewsScraper.sln
 └── FinancialNewsScraper/
     ├── FinancialNewsScraper.csproj
-    └── Program.cs                  # Tutto il codice (scraping + web server)
+    ├── Program.cs                  # Scraping + web server + dashboard
+    ├── Ai/
+    │   └── AiService.cs            # Integrazione Ollama/OpenAI
+    └── Data/
+        ├── NewsDbContext.cs         # Entity Framework + modelli
+        └── NewsRepository.cs       # Query e analytics
 ```
 
 ## Licenza
