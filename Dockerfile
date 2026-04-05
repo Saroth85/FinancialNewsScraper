@@ -26,6 +26,10 @@ ENV AI_MODEL=phi3
 ENV OLLAMA_URL=http://localhost:11434
 ENV RAILWAY_ENVIRONMENT=true
 
+# Percorso modelli Ollama — montare un volume Railway su /data/ollama
+# così i modelli persistono tra i deploy e non vengono riscaricati
+ENV OLLAMA_MODELS=/data/ollama/models
+
 # Ottimizzazioni memoria per Hobby plan (8GB condivisi)
 ENV OLLAMA_NUM_PARALLEL=1
 ENV OLLAMA_MAX_LOADED_MODELS=1
