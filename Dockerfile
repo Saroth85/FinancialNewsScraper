@@ -6,15 +6,14 @@ RUN dotnet restore FinancialNewsScraper/FinancialNewsScraper.csproj
 COPY . .
 RUN dotnet publish FinancialNewsScraper/FinancialNewsScraper.csproj -c Release -o /app
 
+# Ollama stage — prende il binario dall'immagine ufficiale
+FROM ollama/ollama:latest AS ollama
+
 # Runtime stage — unico container con .NET + Playwright + Ollama
 FROM mcr.microsoft.com/playwright/dotnet:v1.49.0-jammy AS runtime
 
-# Installa Ollama (binario diretto, più affidabile in Docker)
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl ca-certificates && \
-    curl -fsSL -o /usr/local/bin/ollama https://ollama.com/download/ollama-linux-amd64 && \
-    chmod +x /usr/local/bin/ollama && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+# Copia il binario Ollama dall'immagine ufficiale (niente curl/download)
+COPY --from=ollama /bin/ollama /usr/local/bin/ollama
 
 WORKDIR /app
 COPY --from=build /app .
