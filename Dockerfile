@@ -9,10 +9,11 @@ RUN dotnet publish FinancialNewsScraper/FinancialNewsScraper.csproj -c Release -
 # Runtime stage — unico container con .NET + Playwright + Ollama
 FROM mcr.microsoft.com/playwright/dotnet:v1.49.0-jammy AS runtime
 
-# Installa Ollama + curl
+# Installa Ollama (binario diretto, più affidabile in Docker)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends curl ca-certificates && \
-    curl -fsSL https://ollama.com/install.sh | bash && \
+    curl -fsSL -o /usr/local/bin/ollama https://ollama.com/download/ollama-linux-amd64 && \
+    chmod +x /usr/local/bin/ollama && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
