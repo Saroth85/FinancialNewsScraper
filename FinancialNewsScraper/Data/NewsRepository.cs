@@ -687,6 +687,29 @@ public class NewsRepository
         return items.Select(a => (a.NewsItem, a)).ToList();
     }
 
+    /// <summary>
+    /// Elimina news e relative analisi AI più vecchie di N giorni.
+    /// </summary>
+    public async Task<int> DeleteOldNewsAsync(int retentionDays = 30)
+    {
+        using var db = CreateContext();
+        var cutoff = DateTime.UtcNow.AddDays(-retentionDays);
+
+        var oldNewsIds = await db.News.Where(n => n.ScrapedAtUtc < cutoff).Select(n => n.Id).ToListAsync();
+        if (oldNewsIds.Count == 0) return 0;
+
+        // Elimina prima le analisi AI collegate
+        var oldAnalyses = db.AiAnalyses.Where(a => oldNewsIds.Contains(a.NewsItemId));
+        db.AiAnalyses.RemoveRange(oldAnalyses);
+
+        // Elimina le news vecchie
+        var oldNews = db.News.Where(n => n.ScrapedAtUtc < cutoff);
+        db.News.RemoveRange(oldNews);
+
+        await db.SaveChangesAsync();
+        return oldNewsIds.Count;
+    }
+
     private static string NormalizeForDedup(string title) =>
         Regex.Replace(title.ToLowerInvariant(), @"[^\w]", "");
 }

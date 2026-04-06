@@ -41,6 +41,7 @@ public static class Program
 
     // Dati condivisi tra scraper e web server
     private static readonly ConcurrentDictionary<string, List<NewsItem>> LatestNews = new();
+    private static readonly SemaphoreSlim ScrapeSemaphore = new(3); // max 3 scraper paralleli
     private static DateTime _lastUpdate = DateTime.MinValue;
     private static bool _isUpdating;
     private static NewsRepository _repository = null!;
@@ -323,27 +324,43 @@ public static class Program
 
             Console.WriteLine($"[{ItalyNow:HH:mm:ss}] Completato - {LatestNews.Values.Sum(l => l.Count)} notizie totali, {saved} nuove salvate nel DB");
 
-            // == AI Analysis (in background, non blocca il ciclo) ==
-            if (_aiService.IsAvailable && saved > 0)
+            // == Pulizia news vecchie (> 30 giorni) ==
+            var deleted = await _repository.DeleteOldNewsAsync(30);
+            if (deleted > 0)
+                Console.WriteLine($"  [CLEANUP] Eliminate {deleted} news più vecchie di 30 giorni");
+
+            // == AI Analysis (in background, analizza TUTTE le news pendenti con throttling) ==
+            if (_aiService.IsAvailable)
             {
                 _ = Task.Run(async () =>
                 {
                     try
                     {
-                        var unanalyzed = await _repository.GetUnanalyzedNewsAsync(20);
-                        var aiCount = 0;
-                        foreach (var news in unanalyzed)
+                        var totalAnalyzed = 0;
+                        while (true)
                         {
-                            var result = await _aiService.AnalyzeNewsAsync(news.Title, news.Source);
-                            if (result != null)
+                            var batch = await _repository.GetUnanalyzedNewsAsync(10);
+                            if (batch.Count == 0) break;
+
+                            foreach (var news in batch)
                             {
-                                await _repository.SaveAiAnalysisAsync(news.Id, result);
-                                aiCount++;
+                                if (cts.Token.IsCancellationRequested) return;
+                                var result = await _aiService.AnalyzeNewsAsync(news.Title, news.Source);
+                                if (result != null)
+                                {
+                                    await _repository.SaveAiAnalysisAsync(news.Id, result);
+                                    totalAnalyzed++;
+                                }
+                                // Throttle: pausa tra ogni chiamata AI per non sovraccaricare
+                                await Task.Delay(TimeSpan.FromSeconds(3), cts.Token);
                             }
                         }
-                        if (aiCount > 0)
-                            Console.WriteLine($"  [AI] Analizzate {aiCount} news con AI");
+                        if (totalAnalyzed > 0)
+                            Console.WriteLine($"  [AI] Analizzate {totalAnalyzed} news con AI (tutte le pendenti completate)");
+                        else
+                            Console.WriteLine($"  [AI] Nessuna news da analizzare");
                     }
+                    catch (OperationCanceledException) { }
                     catch (Exception ex)
                     {
                         Console.WriteLine($"  [AI] Errore analisi background: {ex.Message}");
@@ -353,7 +370,7 @@ public static class Program
 
             Console.WriteLine($"Pagina: http://localhost:{port}\n");
 
-            try { await Task.Delay(TimeSpan.FromMinutes(10), cts.Token); }
+            try { await Task.Delay(TimeSpan.FromHours(1), cts.Token); }
             catch (TaskCanceledException) { break; }
         }
 
@@ -394,19 +411,26 @@ public static class Program
             ("DW Business",       "https://www.dw.com/en/business/s-1431",              "h3 a, a[href*='/a-'], span[class*='headline']"),
         };
 
-        foreach (var (name, url, selector) in browserScrapers)
+        // Scraping parallelo con concorrenza limitata (max 3 pagine contemporanee)
+        var browserTasks = browserScrapers.Select(s => Task.Run(async () =>
         {
+            await ScrapeSemaphore.WaitAsync(ct);
             try
             {
-                var news = await ScrapeBrowserAsync(browser, name, url, selector);
-                target[$"[BROWSER] {name}"] = news;
-                PrintSection($"[BROWSER] {name}", news);
+                var news = await ScrapeBrowserAsync(browser, s.Name, s.Url, s.CssSelector);
+                target[$"[BROWSER] {s.Name}"] = news;
+                PrintSection($"[BROWSER] {s.Name}", news);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                Console.WriteLine($"  [BROWSER {name}] Errore: {ex.Message}");
+                Console.WriteLine($"  [BROWSER {s.Name}] Errore: {ex.Message}");
             }
-        }
+            finally
+            {
+                ScrapeSemaphore.Release();
+            }
+        })).ToArray();
+        await Task.WhenAll(browserTasks);
 
         // == HTML Scraper ==
         try
