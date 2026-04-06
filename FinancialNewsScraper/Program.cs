@@ -43,6 +43,7 @@ public static class Program
     private static readonly ConcurrentDictionary<string, List<NewsItem>> LatestNews = new();
     private static readonly SemaphoreSlim ScrapeSemaphore = new(3); // max 3 scraper paralleli
     private static DateTime _lastUpdate = DateTime.MinValue;
+    private static DateTime _lastAiRun = DateTime.MinValue;
     private static bool _isUpdating;
     private static NewsRepository _repository = null!;
     private static AiService _aiService = null!;
@@ -329,9 +330,11 @@ public static class Program
             if (deleted > 0)
                 Console.WriteLine($"  [CLEANUP] Eliminate {deleted} news più vecchie di 30 giorni");
 
-            // == AI Analysis (in background, analizza TUTTE le news pendenti con throttling) ==
-            if (_aiService.IsAvailable)
+            // == AI Analysis (una volta al giorno, analizza TUTTE le news pendenti con throttling) ==
+            var todayDate = ItalyNow.Date;
+            if (_aiService.IsAvailable && _lastAiRun.Date < todayDate)
             {
+                _lastAiRun = ItalyNow;
                 _ = Task.Run(async () =>
                 {
                     try

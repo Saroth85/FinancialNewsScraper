@@ -7,12 +7,13 @@ Raccoglie notizie da **27+ fonti** italiane e internazionali, le salva in SQLite
 
 ## Come funziona
 
-### Ciclo di scraping (ogni 10 minuti)
+### Ciclo di scraping (ogni 1 ora)
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  1. SCRAPING  (3 tecniche in parallelo)                 │
+│  1. SCRAPING  (3 tecniche, parallelo con SemaphoreSlim) │
 │     ├── Playwright (Chromium headless) → 20 fonti       │
+│     │   └── Max 3 pagine contemporanee (SemaphoreSlim)  │
 │     ├── HtmlAgilityPack (HTML parsing) → 1 fonte        │
 │     └── RSS/XML feed → 6 fonti                          │
 │                                                         │
@@ -22,15 +23,18 @@ Raccoglie notizie da **27+ fonti** italiane e internazionali, le salva in SQLite
 │                                                         │
 │  3. PERSISTENZA → SQLite (news.db)                      │
 │                                                         │
-│  4. ANALISI AI (background, non blocca il ciclo)        │
-│     ├── Ollama + phi3 analizza ogni news                │
+│  4. PULIZIA DB → Elimina news > 30 giorni               │
+│                                                         │
+│  5. ANALISI AI (1 volta al giorno, background)          │
+│     ├── Ollama + phi3 analizza TUTTE le news pendenti   │
+│     ├── Batch da 10, 3 secondi di pausa tra ogni call   │
 │     └── Sentiment, entità, topic, market impact         │
 └─────────────────────────────────────────────────────────┘
 ```
 
 ### Scraping dettagliato
 
-**Browser (Playwright)** — Per i siti JS-heavy che richiedono rendering. Il browser headless Chromium naviga alla pagina, attende il caricamento JS (2s), esegue auto-scroll fino a metà pagina e poi fino in fondo per triggerare il lazy-loading, poi estrae i link con selettori CSS specifici per ogni fonte. Max 10 notizie per fonte.
+**Browser (Playwright)** — Per i siti JS-heavy che richiedono rendering. I 20 browser scraper girano in **parallelo con concorrenza limitata** (`SemaphoreSlim(3)` — max 3 pagine contemporanee) per bilanciare velocità e consumo di RAM. Ogni pagina: navigazione → attesa caricamento JS (2s) → auto-scroll per lazy-loading → estrazione link con CSS selectors. Max 10 notizie per fonte.
 
 **HTML (HtmlAgilityPack)** — Parsing diretto dell'HTML per siti leggeri (Finviz). Scarica l'HTML con HttpClient e usa XPath per estrarre i link alle news.
 
@@ -129,19 +133,34 @@ L'AI genera anche un **briefing quotidiano** aggregando fino a 50 titoli del gio
 | `topMovers` | Titoli/indici/commodity più menzionati |
 | `riskFactors` | 2-3 fattori di rischio |
 
-### Analisi in background
+### Analisi in background (una volta al giorno)
 
-L'analisi AI non blocca lo scraping. Dopo ogni ciclo di raccolta:
-1. Un `Task.Run` in background prende le ultime 20 news non ancora analizzate
-2. Le analizza una alla volta (phi3 impiega ~2-5s per titolo)
-3. Salva i risultati nel DB
+L'analisi AI gira **una sola volta al giorno** per risparmiare risorse. Al primo ciclo di scraping della giornata:
+1. Un `Task.Run` in background prende **tutte** le news non ancora analizzate (batch da 10)
+2. Le analizza una alla volta con **3 secondi di pausa** tra ogni chiamata (throttling)
+3. Continua finché non ha completato tutte le pendenti
 4. Se Ollama non è disponibile o va in errore, il sistema continua a funzionare senza AI
+5. Nei cicli successivi della stessa giornata, l'AI non viene eseguita
 
 ### Doppio sistema di sentiment
 
 L'app ha **due sistemi di sentiment** complementari:
 - **Keyword-based** (veloce, nel Repository): conta parole positive/negative nel titolo. Parole come "rally", "surge", "growth" → positivo; "crash", "plunge", "crisis" → negativo
 - **AI-based** (accurato, via Ollama): analisi semantica completa del titolo con score numerico
+
+---
+
+## Gestione risorse e ottimizzazioni
+
+| Strategia | Dettaglio |
+|-----------|----------|
+| **Refresh ogni 1 ora** | Riduce il carico di scraping da 144 a 24 cicli/giorno |
+| **Scraping parallelo limitato** | `SemaphoreSlim(3)` — max 3 pagine Playwright contemporanee, bilancia velocità e RAM |
+| **AI una volta al giorno** | Analizza tutte le news pendenti in un singolo run giornaliero |
+| **Throttling AI** | 3 secondi di pausa tra ogni chiamata a Ollama per evitare saturazione |
+| **Pulizia DB automatica** | Elimina news e analisi AI più vecchie di 30 giorni ad ogni ciclo |
+| **Ollama ottimizzato** | 1 modello in RAM, 1 richiesta parallela, keep-alive 60s |
+| **GC .NET limitato** | `DOTNET_GCHeapHardLimit=256MB` per contenere l'uso di memoria |
 
 ---
 
@@ -383,6 +402,24 @@ FinancialNewsScraper/
         ├── NewsDbContext.cs         # EF Core context + modelli (News, AiAnalysis, Briefing)
         └── NewsRepository.cs       # Query, analytics, sentiment, velocity, co-occurrence
 ```
+
+---
+
+## Alternative hosting
+
+Oltre a Railway, il progetto può girare su:
+
+| Piattaforma | Prezzo | RAM | Note |
+|-------------|--------|-----|------|
+| **Railway** (attuale) | ~$5/mese + consumo | 8GB condivisi | Setup zero, deploy da GitHub |
+| **Hetzner CAX21 (ARM)** | ~€5.90/mese | 8GB | Ottimo rapporto prezzo/prestazioni, .NET 8 supporta ARM |
+| **Hetzner CX32** | ~€7.50/mese | 8GB | 4 vCPU x86, perfetto per Playwright + Ollama |
+| **Hetzner CX42** | ~€14.90/mese | 16GB | Modelli AI più grandi (llama3 8B) |
+| **Oracle Cloud Free** | Gratis per sempre | 24GB ARM | 4 core ARM, ideale per Ollama |
+| **Render** | Free tier | Limitata | Free tier dorme dopo 15min inattività |
+| **Fly.io** | Free tier | 256MB | Troppo poco per Playwright + Ollama |
+
+**Consiglio con budget $20/mese**: Hetzner CAX21 (ARM, €5.90) — 8GB RAM bastano per tutto, avanzano $14 per upgrade futuri.
 
 ## Licenza
 
