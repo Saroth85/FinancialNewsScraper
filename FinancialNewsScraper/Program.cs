@@ -1889,7 +1889,6 @@ public static class Program
                   document.getElementById('statBear').textContent = data.bearish;
 
                   // Update labels with selected period
-                  const days = getAiDays();
                   document.getElementById('lblPos').textContent = `Positive (${days}gg)`;
                   document.getElementById('lblNeg').textContent = `Negative (${days}gg)`;
                   document.getElementById('lblNeu').textContent = `Neutral (${days}gg)`;
