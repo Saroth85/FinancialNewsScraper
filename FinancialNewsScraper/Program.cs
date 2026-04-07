@@ -43,7 +43,9 @@ public static class Program
     private static readonly ConcurrentDictionary<string, List<NewsItem>> LatestNews = new();
     private static readonly SemaphoreSlim ScrapeSemaphore = new(3); // max 3 scraper paralleli
     private static DateTime _lastUpdate = DateTime.MinValue;
-    private static DateTime _lastAiRun = DateTime.MinValue;
+    private static int _aiAnalyzedToday;
+    private static DateTime _aiAnalyzedTodayDate = DateTime.MinValue;
+    private const int MaxAiPerDay = 200;
     private static bool _isUpdating;
     private static NewsRepository _repository = null!;
     private static AiService _aiService = null!;
@@ -299,6 +301,13 @@ public static class Program
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
 
+        // == AI Background Task: processa max 200 news/giorno, spalmate lentamente ==
+        if (_aiService.IsAvailable)
+        {
+            _ = Task.Run(async () => await RunAiBackgroundLoopAsync(cts.Token));
+            Console.WriteLine($"  [AI] Background loop avviato (max {MaxAiPerDay} news/giorno, ~1 ogni {24 * 60 / MaxAiPerDay} min)\n");
+        }
+
         while (!cts.Token.IsCancellationRequested)
         {
             _isUpdating = true;
@@ -330,54 +339,103 @@ public static class Program
             if (deleted > 0)
                 Console.WriteLine($"  [CLEANUP] Eliminate {deleted} news più vecchie di 30 giorni");
 
-            // == AI Analysis (una volta al giorno, analizza TUTTE le news pendenti con throttling) ==
-            var todayDate = ItalyNow.Date;
-            if (_aiService.IsAvailable && _lastAiRun.Date < todayDate)
-            {
-                _lastAiRun = ItalyNow;
-                _ = Task.Run(async () =>
-                {
-                    try
-                    {
-                        var totalAnalyzed = 0;
-                        while (true)
-                        {
-                            var batch = await _repository.GetUnanalyzedNewsAsync(10);
-                            if (batch.Count == 0) break;
-
-                            foreach (var news in batch)
-                            {
-                                if (cts.Token.IsCancellationRequested) return;
-                                var result = await _aiService.AnalyzeNewsAsync(news.Title, news.Source);
-                                if (result != null)
-                                {
-                                    await _repository.SaveAiAnalysisAsync(news.Id, result);
-                                    totalAnalyzed++;
-                                }
-                                // Throttle: pausa tra ogni chiamata AI per non sovraccaricare
-                                await Task.Delay(TimeSpan.FromSeconds(3), cts.Token);
-                            }
-                        }
-                        if (totalAnalyzed > 0)
-                            Console.WriteLine($"  [AI] Analizzate {totalAnalyzed} news con AI (tutte le pendenti completate)");
-                        else
-                            Console.WriteLine($"  [AI] Nessuna news da analizzare");
-                    }
-                    catch (OperationCanceledException) { }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"  [AI] Errore analisi background: {ex.Message}");
-                    }
-                });
-            }
-
             Console.WriteLine($"Pagina: http://localhost:{port}\n");
 
-            try { await Task.Delay(TimeSpan.FromHours(1), cts.Token); }
+            try { await Task.Delay(TimeSpan.FromHours(4), cts.Token); }
             catch (TaskCanceledException) { break; }
         }
 
         Console.WriteLine("\nUscita...");
+    }
+
+    // ================================================================
+    //  AI Background Loop — max 200 news/giorno spalmate lentamente
+    // ================================================================
+
+    private static async Task RunAiBackgroundLoopAsync(CancellationToken ct)
+    {
+        // Attende 30 secondi all'avvio per dare tempo al primo scraping di popolare il DB
+        await Task.Delay(TimeSpan.FromSeconds(30), ct);
+
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                var todayDate = ItalyNow.Date;
+
+                // Reset contatore giornaliero al cambio data
+                if (_aiAnalyzedTodayDate < todayDate)
+                {
+                    _aiAnalyzedToday = 0;
+                    _aiAnalyzedTodayDate = todayDate;
+                    Console.WriteLine($"  [AI] Nuovo giorno — budget resettato a {MaxAiPerDay} news");
+                }
+
+                var remaining = MaxAiPerDay - _aiAnalyzedToday;
+                if (remaining <= 0)
+                {
+                    // Budget esaurito: attendi fino a mezzanotte + 1 min
+                    var nextDay = todayDate.AddDays(1).AddMinutes(1);
+                    var waitTime = nextDay - ItalyNow;
+                    Console.WriteLine($"  [AI] Budget giornaliero esaurito ({MaxAiPerDay}/{MaxAiPerDay}). Prossimo reset tra {waitTime.Hours}h {waitTime.Minutes}m");
+                    await Task.Delay(waitTime, ct);
+                    continue;
+                }
+
+                // Calcola il ritmo: quanti secondi tra ogni analisi per distribuire uniformemente
+                var secondsLeftToday = Math.Max(60, (int)(todayDate.AddDays(1) - ItalyNow).TotalSeconds);
+                var delayBetweenAnalyses = TimeSpan.FromSeconds(Math.Max(30, secondsLeftToday / remaining));
+
+                // Pesca 1 news con fair sampling da tutte le fonti
+                var batch = await _repository.GetUnanalyzedNewsFairSampledAsync(1);
+                if (batch.Count == 0)
+                {
+                    // Nessuna news da analizzare: attendi 10 minuti e riprova
+                    await Task.Delay(TimeSpan.FromMinutes(10), ct);
+                    continue;
+                }
+
+                var news = batch[0];
+                var result = await _aiService.AnalyzeNewsAsync(news.Title, news.Source);
+                if (result != null)
+                {
+                    await _repository.SaveAiAnalysisAsync(news.Id, result);
+                    Interlocked.Increment(ref _aiAnalyzedToday);
+
+                    if (_aiAnalyzedToday % 20 == 0)
+                        Console.WriteLine($"  [AI] Progresso: {_aiAnalyzedToday}/{MaxAiPerDay} news analizzate oggi (ritmo: ~1 ogni {(int)delayBetweenAnalyses.TotalMinutes}min)");
+                }
+
+                // Genera briefing giornaliero dopo aver analizzato almeno 30 news
+                if (_aiAnalyzedToday >= 30)
+                {
+                    var existingBriefing = await _repository.GetLatestBriefingAsync();
+                    if (existingBriefing == null || existingBriefing.Date != DateTime.UtcNow.ToString("yyyy-MM-dd"))
+                    {
+                        var todayUtc = DateTime.UtcNow.Date;
+                        var recentNews = await _repository.SearchAsync(from: todayUtc, limit: 100);
+                        if (recentNews.Count == 0)
+                            recentNews = await _repository.SearchAsync(limit: 50);
+
+                        var briefing = await _aiService.GenerateDailyBriefingAsync(recentNews.Select(n => n.Title));
+                        if (briefing != null)
+                        {
+                            await _repository.SaveDailyBriefingAsync(briefing);
+                            Console.WriteLine($"  [AI] Briefing giornaliero generato ({_aiAnalyzedToday} news analizzate finora)");
+                        }
+                    }
+                }
+
+                // Attendi il tempo calcolato prima della prossima analisi
+                await Task.Delay(delayBetweenAnalyses, ct);
+            }
+            catch (OperationCanceledException) { break; }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  [AI] Errore: {ex.Message}");
+                await Task.Delay(TimeSpan.FromMinutes(5), ct);
+            }
+        }
     }
 
     // ================================================================

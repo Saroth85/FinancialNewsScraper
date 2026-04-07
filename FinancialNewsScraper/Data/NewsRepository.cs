@@ -639,6 +639,53 @@ public class NewsRepository
     }
 
     /// <summary>
+    /// Ottieni news non analizzate con sampling bilanciato da tutte le fonti.
+    /// Round-robin casuale: pesca da ogni fonte a turno garantendo copertura equa.
+    /// </summary>
+    public async Task<List<StoredNewsItem>> GetUnanalyzedNewsFairSampledAsync(int limit)
+    {
+        using var db = CreateContext();
+        var analyzedIds = db.AiAnalyses.Select(a => a.NewsItemId);
+
+        var unanalyzed = await db.News
+            .Where(n => !analyzedIds.Contains(n.Id))
+            .OrderByDescending(n => n.ScrapedAtUtc)
+            .ToListAsync();
+
+        if (unanalyzed.Count == 0) return new List<StoredNewsItem>();
+
+        // Raggruppa per fonte
+        var bySource = unanalyzed
+            .GroupBy(n => n.Source)
+            .ToDictionary(g => g.Key, g => g.ToList());
+
+        var result = new List<StoredNewsItem>();
+        var rng = new Random();
+
+        // Round-robin casuale: ad ogni giro pesca 1 news random da ogni fonte
+        while (result.Count < limit && bySource.Count > 0)
+        {
+            var emptySources = new List<string>();
+            // Ordine casuale delle fonti ad ogni giro
+            foreach (var source in bySource.Keys.OrderBy(_ => rng.Next()).ToList())
+            {
+                if (result.Count >= limit) break;
+                var items = bySource[source];
+                if (items.Count == 0) { emptySources.Add(source); continue; }
+
+                var idx = rng.Next(items.Count);
+                result.Add(items[idx]);
+                items.RemoveAt(idx);
+
+                if (items.Count == 0) emptySources.Add(source);
+            }
+            foreach (var s in emptySources) bySource.Remove(s);
+        }
+
+        return result;
+    }
+
+    /// <summary>
     /// Sentiment AI trend giornaliero.
     /// </summary>
     public async Task<List<SentimentDaily>> GetAiSentimentTrendAsync(int days = 30)
