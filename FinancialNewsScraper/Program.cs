@@ -375,23 +375,36 @@ public static class Program
             {
                 var todayDate = ItalyNow.Date;
 
+                // Finestra operativa: 8:00 - 16:00 (ora italiana)
+                var hour = ItalyNow.Hour;
+                if (hour < 8 || hour >= 16)
+                {
+                    // Fuori finestra: calcola attesa fino alle 8:00
+                    var next8am = hour >= 16
+                        ? todayDate.AddDays(1).AddHours(8)
+                        : todayDate.AddHours(8);
+                    var waitTime = next8am - ItalyNow;
+                    Console.WriteLine($"  [AI] Fuori finestra operativa (8:00-16:00). Prossimo avvio tra {waitTime.Hours}h {waitTime.Minutes}m");
+                    await Task.Delay(waitTime, ct);
+                    continue;
+                }
+
                 // Legge sempre il conteggio reale dal DB (unica fonte di verità)
                 analyzedToday = await _repository.GetTodayAnalysisCountAsync();
 
                 var remaining = MaxAiPerDay - analyzedToday;
                 if (remaining <= 0)
                 {
-                    // Budget esaurito: attendi fino a mezzanotte + 1 min
-                    var nextDay = todayDate.AddDays(1).AddMinutes(1);
-                    var waitTime = nextDay - ItalyNow;
+                    // Budget esaurito: attendi fino a domani alle 8:00
+                    var next8am = todayDate.AddDays(1).AddHours(8);
+                    var waitTime = next8am - ItalyNow;
                     Console.WriteLine($"  [AI] Budget giornaliero esaurito ({analyzedToday}/{MaxAiPerDay}). Prossimo reset tra {waitTime.Hours}h {waitTime.Minutes}m");
                     await Task.Delay(waitTime, ct);
                     continue;
                 }
 
-                // Calcola il ritmo: quanti secondi tra ogni analisi per distribuire uniformemente
-                var secondsLeftToday = Math.Max(60, (int)(todayDate.AddDays(1) - ItalyNow).TotalSeconds);
-                var delayBetweenAnalyses = TimeSpan.FromSeconds(Math.Max(30, secondsLeftToday / remaining));
+                // 200 analisi in 8h (8:00-16:00) = 1 ogni 144 secondi
+                var delayBetweenAnalyses = TimeSpan.FromSeconds(144);
 
                 // Pesca 1 news con fair sampling da tutte le fonti
                 var batch = await _repository.GetUnanalyzedNewsFairSampledAsync(1);
