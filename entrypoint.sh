@@ -8,8 +8,10 @@ AI_MODEL="${AI_MODEL:-phi3}"
 APP_PORT="${PORT:-8080}"
 export ASPNETCORE_URLS="http://+:${APP_PORT}"
 
-# Crea directory per modelli persistenti (volume Railway)
+# Crea directory per dati persistenti (volume Railway)
 mkdir -p "${OLLAMA_MODELS:-/data/ollama/models}"
+mkdir -p "$(dirname "${DB_PATH:-/data/news.db}")"
+echo "Database SQLite: ${DB_PATH:-/data/news.db}"
 
 echo "=== Avvio Ollama server ==="
 ollama serve &

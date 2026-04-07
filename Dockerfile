@@ -30,6 +30,9 @@ ENV RAILWAY_ENVIRONMENT=true
 # così i modelli persistono tra i deploy e non vengono riscaricati
 ENV OLLAMA_MODELS=/data/ollama/models
 
+# Database SQLite su volume persistente — sopravvive ai redeploy
+ENV DB_PATH=/data/news.db
+
 # Ottimizzazioni memoria per Hobby plan (8GB condivisi)
 ENV OLLAMA_NUM_PARALLEL=1
 ENV OLLAMA_MAX_LOADED_MODELS=1

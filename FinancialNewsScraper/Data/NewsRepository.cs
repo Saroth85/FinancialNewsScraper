@@ -709,6 +709,16 @@ public class NewsRepository
     }
 
     /// <summary>
+    /// Conta le analisi AI effettuate oggi (UTC).
+    /// </summary>
+    public async Task<int> GetTodayAnalysisCountAsync()
+    {
+        using var db = CreateContext();
+        var todayUtc = DateTime.UtcNow.Date;
+        return await db.AiAnalyses.CountAsync(a => a.AnalyzedAtUtc >= todayUtc);
+    }
+
+    /// <summary>
     /// Conteggio analisi AI completate.
     /// </summary>
     public async Task<(int Analyzed, int Total)> GetAiCoverageAsync()
@@ -737,7 +747,7 @@ public class NewsRepository
     /// <summary>
     /// Elimina news e relative analisi AI più vecchie di N giorni.
     /// </summary>
-    public async Task<int> DeleteOldNewsAsync(int retentionDays = 30)
+    public async Task<int> DeleteOldNewsAsync(int retentionDays = 365)
     {
         using var db = CreateContext();
         var cutoff = DateTime.UtcNow.AddDays(-retentionDays);

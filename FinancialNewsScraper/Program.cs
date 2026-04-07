@@ -43,8 +43,6 @@ public static class Program
     private static readonly ConcurrentDictionary<string, List<NewsItem>> LatestNews = new();
     private static readonly SemaphoreSlim ScrapeSemaphore = new(3); // max 3 scraper paralleli
     private static DateTime _lastUpdate = DateTime.MinValue;
-    private static int _aiAnalyzedToday;
-    private static DateTime _aiAnalyzedTodayDate = DateTime.MinValue;
     private const int MaxAiPerDay = 200;
     private static bool _isUpdating;
     private static NewsRepository _repository = null!;
@@ -63,8 +61,9 @@ public static class Program
         Console.OutputEncoding = Encoding.UTF8;
         Console.WriteLine("=== Financial News Scraper ===\n");
 
-        // == Database ==
-        var dbPath = Path.Combine(AppContext.BaseDirectory, "news.db");
+        // == Database (su volume persistente in produzione, locale in dev) ==
+        var dbPath = Environment.GetEnvironmentVariable("DB_PATH")
+            ?? Path.Combine(AppContext.BaseDirectory, "news.db");
         _repository = new NewsRepository(dbPath);
         Console.WriteLine($"Database: {dbPath}\n");
 
@@ -100,7 +99,7 @@ public static class Program
 
         app.MapGet("/api/top-keywords", async (int? days, int? top) =>
         {
-            var keywords = await _repository.GetTopKeywordsAsync(days ?? 7, top ?? 20);
+            var keywords = await _repository.GetTopKeywordsAsync(days ?? 30, top ?? 20);
             return Results.Json(keywords.Select(k => new { keyword = k.Keyword, count = k.Count }));
         });
 
@@ -120,7 +119,7 @@ public static class Program
 
         app.MapGet("/api/sentiment", async (int? days) =>
         {
-            var sentiment = await _repository.GetSentimentAsync(days ?? 7);
+            var sentiment = await _repository.GetSentimentAsync(days ?? 30);
             return Results.Json(sentiment);
         });
 
@@ -150,7 +149,7 @@ public static class Program
 
         app.MapGet("/api/cooccurrence", async (int? days, int? top) =>
         {
-            var data = await _repository.GetCoOccurrencesAsync(days ?? 7, top ?? 20);
+            var data = await _repository.GetCoOccurrencesAsync(days ?? 30, top ?? 20);
             return Results.Json(data);
         });
 
@@ -240,7 +239,7 @@ public static class Program
 
         app.MapGet("/api/ai/sentiment-stats", async (int? days) =>
         {
-            var stats = await _repository.GetAiSentimentStatsAsync(days ?? 7);
+            var stats = await _repository.GetAiSentimentStatsAsync(days ?? 30);
             return Results.Json(new
             {
                 positive = stats.Positive, negative = stats.Negative, neutral = stats.Neutral,
@@ -256,13 +255,13 @@ public static class Program
 
         app.MapGet("/api/ai/entities", async (int? days, int? top) =>
         {
-            var entities = await _repository.GetAiTopEntitiesAsync(days ?? 7, top ?? 20);
+            var entities = await _repository.GetAiTopEntitiesAsync(days ?? 30, top ?? 20);
             return Results.Json(entities.Select(e => new { entity = e.Entity, count = e.Count }));
         });
 
         app.MapGet("/api/ai/topics", async (int? days) =>
         {
-            var topics = await _repository.GetAiTopTopicsAsync(days ?? 7);
+            var topics = await _repository.GetAiTopTopicsAsync(days ?? 30);
             return Results.Json(topics.Select(t => new { topic = t.Topic, count = t.Count }));
         });
 
@@ -334,10 +333,10 @@ public static class Program
 
             Console.WriteLine($"[{ItalyNow:HH:mm:ss}] Completato - {LatestNews.Values.Sum(l => l.Count)} notizie totali, {saved} nuove salvate nel DB");
 
-            // == Pulizia news vecchie (> 30 giorni) ==
-            var deleted = await _repository.DeleteOldNewsAsync(30);
+            // == Pulizia news vecchie (> 365 giorni / 1 anno) ==
+            var deleted = await _repository.DeleteOldNewsAsync(365);
             if (deleted > 0)
-                Console.WriteLine($"  [CLEANUP] Eliminate {deleted} news più vecchie di 30 giorni");
+                Console.WriteLine($"  [CLEANUP] Eliminate {deleted} news più vecchie di 1 anno");
 
             Console.WriteLine($"Pagina: http://localhost:{port}\n");
 
@@ -357,27 +356,25 @@ public static class Program
         // Attende 30 secondi all'avvio per dare tempo al primo scraping di popolare il DB
         await Task.Delay(TimeSpan.FromSeconds(30), ct);
 
+        var analyzedToday = await _repository.GetTodayAnalysisCountAsync();
+        Console.WriteLine($"  [AI] Avvio — dal DB: {analyzedToday}/{MaxAiPerDay} analisi già completate oggi");
+
         while (!ct.IsCancellationRequested)
         {
             try
             {
                 var todayDate = ItalyNow.Date;
 
-                // Reset contatore giornaliero al cambio data
-                if (_aiAnalyzedTodayDate < todayDate)
-                {
-                    _aiAnalyzedToday = 0;
-                    _aiAnalyzedTodayDate = todayDate;
-                    Console.WriteLine($"  [AI] Nuovo giorno — budget resettato a {MaxAiPerDay} news");
-                }
+                // Legge sempre il conteggio reale dal DB (unica fonte di verità)
+                analyzedToday = await _repository.GetTodayAnalysisCountAsync();
 
-                var remaining = MaxAiPerDay - _aiAnalyzedToday;
+                var remaining = MaxAiPerDay - analyzedToday;
                 if (remaining <= 0)
                 {
                     // Budget esaurito: attendi fino a mezzanotte + 1 min
                     var nextDay = todayDate.AddDays(1).AddMinutes(1);
                     var waitTime = nextDay - ItalyNow;
-                    Console.WriteLine($"  [AI] Budget giornaliero esaurito ({MaxAiPerDay}/{MaxAiPerDay}). Prossimo reset tra {waitTime.Hours}h {waitTime.Minutes}m");
+                    Console.WriteLine($"  [AI] Budget giornaliero esaurito ({analyzedToday}/{MaxAiPerDay}). Prossimo reset tra {waitTime.Hours}h {waitTime.Minutes}m");
                     await Task.Delay(waitTime, ct);
                     continue;
                 }
@@ -400,14 +397,14 @@ public static class Program
                 if (result != null)
                 {
                     await _repository.SaveAiAnalysisAsync(news.Id, result);
-                    Interlocked.Increment(ref _aiAnalyzedToday);
+                    analyzedToday++;
 
-                    if (_aiAnalyzedToday % 20 == 0)
-                        Console.WriteLine($"  [AI] Progresso: {_aiAnalyzedToday}/{MaxAiPerDay} news analizzate oggi (ritmo: ~1 ogni {(int)delayBetweenAnalyses.TotalMinutes}min)");
+                    if (analyzedToday % 20 == 0)
+                        Console.WriteLine($"  [AI] Progresso: {analyzedToday}/{MaxAiPerDay} news analizzate oggi (ritmo: ~1 ogni {(int)delayBetweenAnalyses.TotalMinutes}min)");
                 }
 
                 // Genera briefing giornaliero dopo aver analizzato almeno 30 news
-                if (_aiAnalyzedToday >= 30)
+                if (analyzedToday >= 30)
                 {
                     var existingBriefing = await _repository.GetLatestBriefingAsync();
                     if (existingBriefing == null || existingBriefing.Date != DateTime.UtcNow.ToString("yyyy-MM-dd"))
@@ -421,7 +418,7 @@ public static class Program
                         if (briefing != null)
                         {
                             await _repository.SaveDailyBriefingAsync(briefing);
-                            Console.WriteLine($"  [AI] Briefing giornaliero generato ({_aiAnalyzedToday} news analizzate finora)");
+                            Console.WriteLine($"  [AI] Briefing giornaliero generato ({analyzedToday} news analizzate finora)");
                         }
                     }
                 }
@@ -1104,6 +1101,18 @@ public static class Program
 
               <!-- Export bar -->
               <div class="export-bar">
+                <div style="display:flex; align-items:center; gap:8px; margin-right:auto;">
+                  <label style="font-size:0.85em; color:#8b949e; font-weight:600;">&#128197; Periodo globale:</label>
+                  <select id="global-days" onchange="reloadAll()" style="background:#0d1117; border:1px solid #30363d; color:#c9d1d9; padding:6px 10px; border-radius:6px; font-size:0.85em;">
+                    <option value="7">7 giorni</option>
+                    <option value="14">14 giorni</option>
+                    <option value="30" selected>30 giorni</option>
+                    <option value="60">60 giorni</option>
+                    <option value="90">90 giorni</option>
+                    <option value="180">6 mesi</option>
+                    <option value="365">1 anno</option>
+                  </select>
+                </div>
                 <button class="btn secondary" onclick="window.open('/api/export','_blank')">&#128229; Esporta CSV (tutte le news)</button>
               </div>
 
@@ -1127,6 +1136,8 @@ public static class Program
                     <option value="30" selected>30 giorni</option>
                     <option value="60">60 giorni</option>
                     <option value="90">90 giorni</option>
+                    <option value="180">6 mesi</option>
+                    <option value="365">1 anno</option>
                   </select>
                 </div>
                 <button class="btn" onclick="loadTrend()">Aggiorna</button>
@@ -1153,6 +1164,8 @@ public static class Program
                     <option value="30" selected>30 giorni</option>
                     <option value="60">60 giorni</option>
                     <option value="90">90 giorni</option>
+                    <option value="180">6 mesi</option>
+                    <option value="365">1 anno</option>
                   </select>
                 </div>
                 <button class="btn" onclick="loadMultiTrend()">Confronta</button>
@@ -1169,11 +1182,11 @@ public static class Program
               <h2 class="section-title">&#128161; Analisi Sentiment</h2>
               <div class="charts-grid">
                 <div class="chart-card">
-                  <h3>&#127919; Sentiment Attuale (7 giorni)</h3>
+                  <h3 id="sentTitle">&#127919; Sentiment Attuale (30 giorni)</h3>
                   <canvas id="sentimentChart" height="200"></canvas>
                 </div>
                 <div class="chart-card">
-                  <h3>&#128200; Sentiment Trend (30 giorni)</h3>
+                  <h3 id="sentTrendTitle">&#128200; Sentiment Trend (30 giorni)</h3>
                   <canvas id="sentimentTrendChart" height="200"></canvas>
                 </div>
               </div>
@@ -1182,11 +1195,11 @@ public static class Program
               <h2 class="section-title">&#128337; Distribuzione Temporale</h2>
               <div class="charts-grid">
                 <div class="chart-card">
-                  <h3>&#9200; Distribuzione per Ora del Giorno</h3>
+                  <h3 id="hourlyTitle">&#9200; Distribuzione per Ora (30 giorni)</h3>
                   <canvas id="hourlyChart" height="200"></canvas>
                 </div>
                 <div class="chart-card">
-                  <h3>&#128197; Distribuzione per Giorno della Settimana</h3>
+                  <h3 id="weekdayTitle">&#128197; Distribuzione per Giorno (30 giorni)</h3>
                   <canvas id="weekdayChart" height="200"></canvas>
                 </div>
               </div>
@@ -1195,7 +1208,7 @@ public static class Program
               <h2 class="section-title">&#127991; Keywords &amp; Topics</h2>
               <div class="charts-grid">
                 <div class="chart-card">
-                  <h3>&#128293; Top Keywords (7 giorni)</h3>
+                  <h3 id="kwTitle">&#128293; Top Keywords (30 giorni)</h3>
                   <canvas id="keywordsChart" height="250"></canvas>
                 </div>
                 <div class="chart-card">
@@ -1217,7 +1230,7 @@ public static class Program
                   </div>
                 </div>
                 <div class="chart-card">
-                  <h3>&#128279; Co-occorrenze Keywords (7 giorni)</h3>
+                  <h3 id="coocTitle">&#128279; Co-occorrenze Keywords (30 giorni)</h3>
                   <div style="max-height:400px;overflow-y:auto">
                     <ul class="cooc-list" id="cooc-list"></ul>
                   </div>
@@ -1228,7 +1241,7 @@ public static class Program
               <h2 class="section-title">&#128218; Sorgenti</h2>
               <div class="charts-grid">
                 <div class="chart-card full-width">
-                  <h3>&#128218; Top Sorgenti (30 giorni)</h3>
+                  <h3 id="sourcesTitle">&#128218; Top Sorgenti (30 giorni)</h3>
                   <canvas id="sourcesChart" height="60"></canvas>
                 </div>
               </div>
@@ -1242,9 +1255,24 @@ public static class Program
               let trendChart, multiTrendChart, sentimentChart, sentimentTrendChart,
                   hourlyChart, weekdayChart, keywordsChart, categoryChart, sourcesChart;
 
+              function gDays() { return document.getElementById('global-days').value; }
+
+              // Update all section titles with the selected period
+              function updateTitles(d) {
+                document.getElementById('sentTitle').innerHTML = `&#127919; Sentiment Attuale (${d} giorni)`;
+                document.getElementById('sentTrendTitle').innerHTML = `&#128200; Sentiment Trend (${d} giorni)`;
+                document.getElementById('hourlyTitle').innerHTML = `&#9200; Distribuzione per Ora (${d} giorni)`;
+                document.getElementById('weekdayTitle').innerHTML = `&#128197; Distribuzione per Giorno (${d} giorni)`;
+                document.getElementById('kwTitle').innerHTML = `&#128293; Top Keywords (${d} giorni)`;
+                document.getElementById('coocTitle').innerHTML = `&#128279; Co-occorrenze Keywords (${d} giorni)`;
+                document.getElementById('sourcesTitle').innerHTML = `&#128218; Top Sorgenti (${d} giorni)`;
+              }
+
               // ===== STATS =====
-              Promise.all([fetch('/api/stats').then(r=>r.json()), fetch('/api/sentiment?days=7').then(r=>r.json())])
-              .then(([stats, sent]) => {
+              function loadStats() {
+                const days = gDays();
+                Promise.all([fetch('/api/stats').then(r=>r.json()), fetch('/api/sentiment?days=' + days).then(r=>r.json())])
+                .then(([stats, sent]) => {
                 const grid = document.getElementById('stats-grid');
                 const total = sent.positive + sent.negative + sent.neutral;
                 const sentPct = total > 0 ? Math.round((sent.positive / total) * 100) : 0;
@@ -1253,14 +1281,15 @@ public static class Program
                   { value: stats.firstDate ? new Date(stats.firstDate).toLocaleDateString('it-IT') : '-', label: 'Prima news', cls: '' },
                   { value: stats.lastDate ? new Date(stats.lastDate).toLocaleDateString('it-IT') : '-', label: 'Ultima news', cls: '' },
                   { value: stats.sources?.length || 0, label: 'Sorgenti attive', cls: '' },
-                  { value: sent.positive, label: 'Positive (7gg)', cls: 'green' },
-                  { value: sent.negative, label: 'Negative (7gg)', cls: 'red' },
-                  { value: sentPct + '%', label: 'Sentiment Index', cls: sentPct >= 50 ? 'green' : 'red' },
+                  { value: sent.positive, label: `Positive (${days}gg)`, cls: 'green' },
+                  { value: sent.negative, label: `Negative (${days}gg)`, cls: 'red' },
+                  { value: sentPct + '%', label: `Sentiment Index (${days}gg)`, cls: sentPct >= 50 ? 'green' : 'red' },
                 ];
                 cards.forEach(c => {
                   grid.innerHTML += `<div class="stat-card"><div class="value ${c.cls}">${c.value}</div><div class="label">${c.label}</div></div>`;
                 });
               });
+              }
 
               // ===== SINGLE TREND =====
               function loadTrend() {
@@ -1316,7 +1345,10 @@ public static class Program
               }
 
               // ===== SENTIMENT =====
-              fetch('/api/sentiment?days=7').then(r=>r.json()).then(data => {
+              function loadSentiment() {
+              const days = gDays();
+              fetch('/api/sentiment?days=' + days).then(r=>r.json()).then(data => {
+                if(sentimentChart) sentimentChart.destroy();
                 sentimentChart = new Chart(document.getElementById('sentimentChart'), {
                   type: 'doughnut',
                   data: { labels: ['Positive', 'Negative', 'Neutral'],
@@ -1325,9 +1357,13 @@ public static class Program
                   options: { responsive: true, plugins: { legend: { position: 'bottom' } } }
                 });
               });
+              }
 
-              fetch('/api/sentiment-trend?days=30').then(r=>r.json()).then(data => {
+              function loadSentimentTrendAnalytics() {
+              const days = gDays();
+              fetch('/api/sentiment-trend?days=' + days).then(r=>r.json()).then(data => {
                 const labels = data.map(d => new Date(d.date).toLocaleDateString('it-IT', {day:'2-digit',month:'2-digit'}));
+                if(sentimentTrendChart) sentimentTrendChart.destroy();
                 sentimentTrendChart = new Chart(document.getElementById('sentimentTrendChart'), {
                   type: 'bar',
                   data: { labels, datasets: [
@@ -1339,9 +1375,13 @@ public static class Program
                     scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true } } }
                 });
               });
+              }
 
               // ===== HOURLY / WEEKDAY =====
-              fetch('/api/hourly').then(r=>r.json()).then(data => {
+              function loadHourly() {
+              const days = gDays();
+              fetch('/api/hourly?days=' + days).then(r=>r.json()).then(data => {
+                if(hourlyChart) hourlyChart.destroy();
                 hourlyChart = new Chart(document.getElementById('hourlyChart'), {
                   type: 'bar',
                   data: { labels: data.map(d => d.hour + ':00'),
@@ -1352,9 +1392,13 @@ public static class Program
                     scales: { y: { beginAtZero: true } } }
                 });
               });
+              }
 
-              fetch('/api/weekday').then(r=>r.json()).then(data => {
+              function loadWeekday() {
+              const days = gDays();
+              fetch('/api/weekday?days=' + days).then(r=>r.json()).then(data => {
                 const dayColors = ['#da3633','#58a6ff','#58a6ff','#58a6ff','#58a6ff','#58a6ff','#f0883e'];
+                if(weekdayChart) weekdayChart.destroy();
                 weekdayChart = new Chart(document.getElementById('weekdayChart'), {
                   type: 'bar',
                   data: { labels: data.map(d => d.dayName),
@@ -1365,9 +1409,13 @@ public static class Program
                     scales: { y: { beginAtZero: true } } }
                 });
               });
+              }
 
               // ===== KEYWORDS =====
-              fetch('/api/top-keywords?days=7&top=15').then(r=>r.json()).then(data => {
+              function loadKeywords() {
+              const days = gDays();
+              fetch('/api/top-keywords?days=' + days + '&top=15').then(r=>r.json()).then(data => {
+                if(keywordsChart) keywordsChart.destroy();
                 keywordsChart = new Chart(document.getElementById('keywordsChart'), {
                   type: 'bar',
                   data: { labels: data.map(d => d.keyword),
@@ -1378,11 +1426,14 @@ public static class Program
                     scales: { x: { beginAtZero: true } } }
                 });
               });
+              }
 
               // ===== CATEGORY =====
+              function loadCategory() {
               fetch('/api/stats').then(r=>r.json()).then(data => {
                 if(!data.categories?.length) return;
                 const colors = { BROWSER: '#3fb950', HTML: '#a371f7', RSS: '#da3633' };
+                if(categoryChart) categoryChart.destroy();
                 categoryChart = new Chart(document.getElementById('categoryChart'), {
                   type: 'doughnut',
                   data: { labels: data.categories.map(c => c.category),
@@ -1391,8 +1442,10 @@ public static class Program
                   options: { responsive: true, plugins: { legend: { position: 'bottom' } } }
                 });
               });
+              }
 
               // ===== VELOCITY =====
+              function loadVelocity() {
               fetch('/api/velocity').then(r=>r.json()).then(data => {
                 const tbody = document.querySelector('#velocity-table tbody');
                 data.forEach(v => {
@@ -1405,9 +1458,12 @@ public static class Program
                   tbody.appendChild(tr);
                 });
               });
+              }
 
               // ===== CO-OCCURRENCE =====
-              fetch('/api/cooccurrence?days=7&top=15').then(r=>r.json()).then(data => {
+              function loadCoOccurrence() {
+              const days = gDays();
+              fetch('/api/cooccurrence?days=' + days + '&top=15').then(r=>r.json()).then(data => {
                 const list = document.getElementById('cooc-list');
                 const maxCount = data.length > 0 ? data[0].count : 1;
                 data.forEach(co => {
@@ -1421,11 +1477,14 @@ public static class Program
                   list.appendChild(li);
                 });
               });
+              }
 
               // ===== SOURCES =====
+              function loadSources() {
               fetch('/api/stats').then(r=>r.json()).then(data => {
                 if(!data.sources?.length) return;
                 const top = data.sources.slice(0, 20);
+                if(sourcesChart) sourcesChart.destroy();
                 sourcesChart = new Chart(document.getElementById('sourcesChart'), {
                   type: 'bar',
                   data: { labels: top.map(s => s.source),
@@ -1435,10 +1494,36 @@ public static class Program
                     scales: { y: { beginAtZero: true } } }
                 });
               });
+              }
 
               function esc(s) { const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
 
-              // Auto load trend
+              // Reload everything when period changes
+              function reloadAll() {
+                const d = gDays();
+                updateTitles(d);
+                // Clear dynamic elements
+                document.getElementById('stats-grid').innerHTML = '';
+                document.querySelector('#velocity-table tbody').innerHTML = '';
+                document.getElementById('cooc-list').innerHTML = '';
+                // Destroy existing charts
+                [sentimentChart, sentimentTrendChart, hourlyChart, weekdayChart, keywordsChart, categoryChart, sourcesChart].forEach(c => { if(c) c.destroy(); });
+                sentimentChart = sentimentTrendChart = hourlyChart = weekdayChart = keywordsChart = categoryChart = sourcesChart = null;
+                // Reload all sections
+                loadStats();
+                loadSentiment();
+                loadSentimentTrendAnalytics();
+                loadHourly();
+                loadWeekday();
+                loadKeywords();
+                loadCategory();
+                loadVelocity();
+                loadCoOccurrence();
+                loadSources();
+              }
+
+              // Auto load
+              reloadAll();
               loadTrend();
             </script>
             </body>
@@ -1576,6 +1661,18 @@ public static class Program
                 <button class="btn btn-secondary" onclick="loadAll()">
                   &#128260; Aggiorna Dashboard
                 </button>
+                <div style="margin-left:auto; display:flex; align-items:center; gap:8px;">
+                  <label style="font-size:0.8rem; color:#8b949e;">Periodo:</label>
+                  <select id="ai-days" onchange="loadAll()" style="background:#0d1117; border:1px solid #30363d; color:#c9d1d9; padding:6px 10px; border-radius:6px; font-size:0.85rem;">
+                    <option value="7">7 giorni</option>
+                    <option value="14">14 giorni</option>
+                    <option value="30" selected>30 giorni</option>
+                    <option value="60">60 giorni</option>
+                    <option value="90">90 giorni</option>
+                    <option value="180">6 mesi</option>
+                    <option value="365">1 anno</option>
+                  </select>
+                </div>
               </div>
 
               <!-- Coverage -->
@@ -1589,11 +1686,11 @@ public static class Program
 
               <!-- Stats Row -->
               <div class="stat-grid" id="statsRow">
-                <div class="stat-card"><div class="value positive" id="statPos">-</div><div class="label">Positive</div></div>
-                <div class="stat-card"><div class="value negative" id="statNeg">-</div><div class="label">Negative</div></div>
-                <div class="stat-card"><div class="value neutral" id="statNeu">-</div><div class="label">Neutral</div></div>
-                <div class="stat-card"><div class="value bullish" id="statBull">-</div><div class="label">Bullish</div></div>
-                <div class="stat-card"><div class="value bearish" id="statBear">-</div><div class="label">Bearish</div></div>
+                <div class="stat-card"><div class="value positive" id="statPos">-</div><div class="label" id="lblPos">Positive (30gg)</div></div>
+                <div class="stat-card"><div class="value negative" id="statNeg">-</div><div class="label" id="lblNeg">Negative (30gg)</div></div>
+                <div class="stat-card"><div class="value neutral" id="statNeu">-</div><div class="label" id="lblNeu">Neutral (30gg)</div></div>
+                <div class="stat-card"><div class="value bullish" id="statBull">-</div><div class="label" id="lblBull">Bullish (30gg)</div></div>
+                <div class="stat-card"><div class="value bearish" id="statBear">-</div><div class="label" id="lblBear">Bearish (30gg)</div></div>
               </div>
 
               <div class="grid">
@@ -1649,6 +1746,7 @@ public static class Program
               let aiSentimentChart, marketImpactChart, aiSentimentTrendChart, entitiesChart, topicsChart;
 
               function esc(s) { const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+              function getAiDays() { return document.getElementById('ai-days').value; }
 
               // Check AI status
               async function checkStatus() {
@@ -1745,13 +1843,22 @@ public static class Program
               // Load sentiment stats
               async function loadSentimentStats() {
                 try {
-                  const r = await fetch('/api/ai/sentiment-stats?days=7');
+                  const days = getAiDays();
+                  const r = await fetch('/api/ai/sentiment-stats?days=' + days);
                   const data = await r.json();
                   document.getElementById('statPos').textContent = data.positive;
                   document.getElementById('statNeg').textContent = data.negative;
                   document.getElementById('statNeu').textContent = data.neutral;
                   document.getElementById('statBull').textContent = data.bullish;
                   document.getElementById('statBear').textContent = data.bearish;
+
+                  // Update labels with selected period
+                  const days = getAiDays();
+                  document.getElementById('lblPos').textContent = `Positive (${days}gg)`;
+                  document.getElementById('lblNeg').textContent = `Negative (${days}gg)`;
+                  document.getElementById('lblNeu').textContent = `Neutral (${days}gg)`;
+                  document.getElementById('lblBull').textContent = `Bullish (${days}gg)`;
+                  document.getElementById('lblBear').textContent = `Bearish (${days}gg)`;
 
                   // Sentiment donut
                   if (aiSentimentChart) aiSentimentChart.destroy();
@@ -1783,7 +1890,8 @@ public static class Program
               // Load sentiment trend
               async function loadSentimentTrend() {
                 try {
-                  const r = await fetch('/api/ai/sentiment-trend?days=30');
+                  const days = getAiDays();
+                  const r = await fetch('/api/ai/sentiment-trend?days=' + days);
                   const data = await r.json();
                   if (!data.length) return;
                   const labels = data.map(d => new Date(d.date).toLocaleDateString('it-IT', {day:'2-digit',month:'2-digit'}));
@@ -1804,7 +1912,8 @@ public static class Program
               // Load entities
               async function loadEntities() {
                 try {
-                  const r = await fetch('/api/ai/entities?days=7&top=15');
+                  const days = getAiDays();
+                  const r = await fetch('/api/ai/entities?days=' + days + '&top=15');
                   const data = await r.json();
                   if (!data.length) return;
                   if (entitiesChart) entitiesChart.destroy();
@@ -1822,7 +1931,8 @@ public static class Program
               // Load topics
               async function loadTopics() {
                 try {
-                  const r = await fetch('/api/ai/topics?days=7');
+                  const days = getAiDays();
+                  const r = await fetch('/api/ai/topics?days=' + days);
                   const data = await r.json();
                   if (!data.length) return;
                   if (topicsChart) topicsChart.destroy();

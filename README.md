@@ -488,7 +488,7 @@ GeneratedAtUtc  DATETIME     -- Data/ora generazione
 ```
 
 ### Pulizia automatica
-Ad ogni ciclo di scraping vengono eliminate automaticamente le news più vecchie di **30 giorni**, insieme alle relative analisi AI.
+Ad ogni ciclo di scraping vengono eliminate automaticamente le news più vecchie di **1 anno** (365 giorni), insieme alle relative analisi AI.
 
 ---
 
@@ -500,7 +500,7 @@ Ad ogni ciclo di scraping vengono eliminate automaticamente le news più vecchie
 | **Scraping parallelo limitato** | `SemaphoreSlim(3)` — max 3 pagine Playwright contemporanee, bilancia velocità e RAM |
 | **AI max 200/giorno, loop continuo** | Background indipendente, ~1 news ogni 7 min, spalmate su 24h |
 | **Throttling AI** | Ritmo auto-adattivo: secondi_rimasti / news_rimaste (min 30s) |
-| **Pulizia DB automatica** | Elimina news e analisi AI più vecchie di 30 giorni ad ogni ciclo |
+| **Pulizia DB automatica** | Elimina news e analisi AI più vecchie di 1 anno ad ogni ciclo |
 | **Ollama ottimizzato** | 1 modello in RAM, 1 richiesta parallela, keep-alive 60s |
 | **GC .NET limitato** | `DOTNET_GCHeapHardLimit=256MB` per contenere l'uso di memoria |
 
@@ -605,11 +605,15 @@ Container unico all-in-one: .NET + Playwright + Ollama + phi3.
 
 ### Volume persistente (fondamentale)
 
-Senza volume, il modello phi3 (~2.3GB) viene riscaricato ad ogni deploy.
+Senza volume, il database SQLite e il modello phi3 (~2.3GB) vengono persi ad ogni deploy.
 
 1. Nel dashboard Railway → **Service → Volumes → Add Volume**
-2. **Mount path**: `/data/ollama`
+2. **Mount path**: `/data`
 3. **Size**: 5GB
+
+Il volume mantiene tra i deploy:
+- `news.db` — tutto lo storico delle news e analisi AI
+- `ollama/models/` — il modello phi3 (non viene riscaricato)
 
 ### Cosa succede ad ogni deploy
 
@@ -617,6 +621,7 @@ Senza volume, il modello phi3 (~2.3GB) viene riscaricato ad ogni deploy.
 1. Railway rebuilda il container (build stage)
 2. Il container si riavvia
 3. entrypoint.sh:
+   ├── Crea /data/ (DB + modelli)
    ├── Avvia Ollama server (~2s)
    ├── Controlla se phi3 è nel volume
    │   ├── SÌ → "skip download" → pronto in ~5s
@@ -638,6 +643,7 @@ Senza volume, il modello phi3 (~2.3GB) viene riscaricato ad ogni deploy.
 | Variabile | Default | Descrizione |
 |-----------|---------|-------------|
 | `PORT` | `5050` (locale) / `8080` (Railway) | Porta web server |
+| `DB_PATH` | `/data/news.db` (Railway) / `./news.db` (locale) | Percorso database SQLite |
 | `AI_PROVIDER` | `ollama` | Provider: `ollama` o `openai` |
 | `AI_MODEL` | `phi3` | Modello AI |
 | `OLLAMA_URL` | `http://localhost:11434` | URL Ollama |
