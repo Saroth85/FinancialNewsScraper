@@ -49,7 +49,7 @@ public class AiService
 
     public AiService()
     {
-        _http = new HttpClient { Timeout = TimeSpan.FromSeconds(120) };
+        _http = new HttpClient { Timeout = TimeSpan.FromSeconds(300) };
         _provider = Environment.GetEnvironmentVariable("AI_PROVIDER")?.ToLowerInvariant() ?? "ollama";
         _ollamaUrl = Environment.GetEnvironmentVariable("OLLAMA_URL") ?? "http://localhost:11434";
         _openAiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
@@ -91,6 +91,33 @@ public class AiService
         {
             IsAvailable = false;
             Console.WriteLine("  [AI] Servizio AI non raggiungibile. AI disabilitata.");
+        }
+    }
+
+    /// <summary>
+    /// Pre-carica il modello in RAM inviando un prompt minimale.
+    /// Da chiamare nel background loop, NON al startup (blocca il web server).
+    /// </summary>
+    public async Task<bool> WarmUpModelAsync()
+    {
+        if (!IsAvailable || _provider != "ollama") return true;
+        try
+        {
+            Console.WriteLine($"  [AI] Pre-caricamento modello {_model} in RAM...");
+            var warmup = new { model = _model, prompt = "hi", stream = false, options = new { num_predict = 1 }, keep_alive = "10m" };
+            var wr = await _http.PostAsJsonAsync($"{_ollamaUrl}/api/generate", warmup);
+            if (wr.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"  [AI] Modello {_model} caricato in RAM e pronto.");
+                return true;
+            }
+            Console.WriteLine($"  [AI] Warm-up fallito (HTTP {wr.StatusCode})");
+            return false;
+        }
+        catch (Exception wex)
+        {
+            Console.WriteLine($"  [AI] Warm-up timeout/errore: {wex.Message}");
+            return false;
         }
     }
 
@@ -251,7 +278,8 @@ public class AiService
             model = _model,
             prompt = prompt,
             stream = false,
-            options = new { temperature = 0.3 }
+            options = new { temperature = 0.3 },
+            keep_alive = "10m"
         };
 
         var response = await _http.PostAsJsonAsync($"{_ollamaUrl}/api/generate", request);

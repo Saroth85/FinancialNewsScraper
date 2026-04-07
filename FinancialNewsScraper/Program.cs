@@ -357,6 +357,15 @@ public static class Program
         // Attende 30 secondi all'avvio per dare tempo al primo scraping di popolare il DB
         await Task.Delay(TimeSpan.FromSeconds(30), ct);
 
+        // Pre-carica il modello in RAM (fatto qui e non al startup per non bloccare il web server)
+        var warmupOk = await _aiService.WarmUpModelAsync();
+        if (!warmupOk)
+        {
+            Console.WriteLine("  [AI] Warm-up fallito, riprovo tra 60s...");
+            await Task.Delay(TimeSpan.FromSeconds(60), ct);
+            await _aiService.WarmUpModelAsync();
+        }
+
         var analyzedToday = await _repository.GetTodayAnalysisCountAsync();
         Console.WriteLine($"  [AI] Avvio — dal DB: {analyzedToday}/{MaxAiPerDay} analisi già completate oggi");
 

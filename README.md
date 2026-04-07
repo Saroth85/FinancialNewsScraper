@@ -375,7 +375,8 @@ Lista scrollabile delle ultime 30 news analizzate dall'AI, per ognuna:
 2. Il prompt chiede di rispondere **solo in JSON** con campi specifici
 3. Il modello genera la risposta, `AiService` estrae il JSON (trova `{` ... `}`) e lo parsa
 4. Temperature bassa (0.3) per risposte deterministiche
-5. Timeout HTTP di 120 secondi per modelli lenti
+5. Timeout HTTP di 300 secondi per modelli lenti, keep-alive 10 minuti
+6. Pre-caricamento modello in RAM (warm-up) nel background loop, senza bloccare il web server
 
 ### Analisi per singola news
 
@@ -501,7 +502,7 @@ Ad ogni ciclo di scraping vengono eliminate automaticamente le news più vecchie
 | **AI max 200/giorno, loop continuo** | Background indipendente, ~1 news ogni 7 min, spalmate su 24h |
 | **Throttling AI** | Ritmo auto-adattivo: secondi_rimasti / news_rimaste (min 30s) |
 | **Pulizia DB automatica** | Elimina news e analisi AI più vecchie di 1 anno ad ogni ciclo |
-| **Ollama ottimizzato** | 1 modello in RAM, 1 richiesta parallela, keep-alive 60s |
+| **Ollama ottimizzato** | 1 modello in RAM, 1 richiesta parallela, keep-alive 10min, warm-up in background |
 | **GC .NET limitato** | `DOTNET_GCHeapHardLimit=256MB` per contenere l'uso di memoria |
 
 ---
