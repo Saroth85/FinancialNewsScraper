@@ -79,7 +79,7 @@ Ad ogni ciclo (ogni **4 ore**):
 │                                                                  │
 │  3. PERSISTENZA → SQLite (news.db)                               │
 │                                                                  │
-│  4. PULIZIA DB → Elimina news > 30 giorni                        │
+│  4. PULIZIA DB → Elimina news > 1 anno (365 giorni)              │
 │                                                                  │
 │  5. ANALISI AI (background continuo, indipendente dallo scraping) │
 │     ├── Max 200 news/giorno, spalmate lentamente (~1 ogni 7 min)  │
