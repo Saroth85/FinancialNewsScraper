@@ -68,6 +68,7 @@ public static class Program
         Console.WriteLine($"Database: {dbPath}\n");
 
         // == AI Service ==
+        Console.WriteLine("Verifica connessione AI...");
         _aiService = new AiService();
         await _aiService.CheckConnectionAsync();
 
@@ -393,14 +394,20 @@ public static class Program
                 }
 
                 var news = batch[0];
+                if (analyzedToday == 0)
+                    Console.WriteLine($"  [AI] Prima analisi in corso: \"{news.Title[..Math.Min(60, news.Title.Length)]}...\" (fonte: {news.Source})");
                 var result = await _aiService.AnalyzeNewsAsync(news.Title, news.Source);
                 if (result != null)
                 {
                     await _repository.SaveAiAnalysisAsync(news.Id, result);
                     analyzedToday++;
 
-                    if (analyzedToday % 20 == 0)
-                        Console.WriteLine($"  [AI] Progresso: {analyzedToday}/{MaxAiPerDay} news analizzate oggi (ritmo: ~1 ogni {(int)delayBetweenAnalyses.TotalMinutes}min)");
+                    if (analyzedToday <= 3 || analyzedToday % 20 == 0)
+                        Console.WriteLine($"  [AI] Analisi #{analyzedToday}/{MaxAiPerDay}: {result.Sentiment} ({result.SentimentScore:+0.0;-0.0}) — \"{news.Title[..Math.Min(50, news.Title.Length)]}...\" (ritmo: ~{(int)delayBetweenAnalyses.TotalSeconds}s)");
+                }
+                else if (analyzedToday == 0)
+                {
+                    Console.WriteLine($"  [AI] Analisi fallita per: \"{news.Title[..Math.Min(60, news.Title.Length)]}...\" — Ollama non ha risposto");
                 }
 
                 // Genera briefing giornaliero dopo aver analizzato almeno 30 news
@@ -427,9 +434,17 @@ public static class Program
                 await Task.Delay(delayBetweenAnalyses, ct);
             }
             catch (OperationCanceledException) { break; }
+            catch (Microsoft.Data.Sqlite.SqliteException dbEx)
+            {
+                Console.WriteLine($"  [AI] Errore DB: {dbEx.Message} (tabella mancante o schema incompatibile?)");
+                Console.WriteLine($"  [AI] Stack: {dbEx.StackTrace?.Split('\n').FirstOrDefault()}");
+                await Task.Delay(TimeSpan.FromMinutes(5), ct);
+            }
             catch (Exception ex)
             {
                 Console.WriteLine($"  [AI] Errore: {ex.Message}");
+                if (ex.InnerException != null)
+                    Console.WriteLine($"  [AI] Inner: {ex.InnerException.Message}");
                 await Task.Delay(TimeSpan.FromMinutes(5), ct);
             }
         }
@@ -1748,13 +1763,15 @@ public static class Program
               function esc(s) { const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
               function getAiDays() { return document.getElementById('ai-days').value; }
 
-              // Check AI status
+              // Check AI status (con retry automatico)
+              let _statusRetries = 0;
               async function checkStatus() {
                 try {
                   const r = await fetch('/api/ai/status');
                   const data = await r.json();
                   const el = document.getElementById('aiStatus');
                   const txt = document.getElementById('aiStatusText');
+                  _statusRetries = 0;
                   if (data.available) {
                     el.className = 'ai-status online';
                     txt.textContent = 'AI Engine connesso e operativo';
@@ -1764,7 +1781,17 @@ public static class Program
                     el.className = 'ai-status offline';
                     txt.innerHTML = 'AI non disponibile. Configura <b>Ollama</b> (locale) o <b>OpenAI API</b> per abilitare le funzionalit\u00E0 AI.';
                   }
-                } catch { }
+                } catch {
+                  _statusRetries++;
+                  if (_statusRetries <= 5) {
+                    setTimeout(checkStatus, 3000);
+                  } else {
+                    const el = document.getElementById('aiStatus');
+                    const txt = document.getElementById('aiStatusText');
+                    el.className = 'ai-status offline';
+                    txt.textContent = 'Impossibile verificare lo stato AI. Ricarica la pagina.';
+                  }
+                }
               }
 
               // Analyze news

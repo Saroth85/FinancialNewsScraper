@@ -47,6 +47,40 @@ public class NewsRepository
         _dbPath = dbPath;
         using var db = CreateContext();
         db.Database.EnsureCreated();
+
+        // EnsureCreated() NON aggiunge tabelle a un DB esistente con schema vecchio.
+        // Questi CREATE TABLE IF NOT EXISTS gestiscono l'evoluzione dello schema.
+        db.Database.ExecuteSqlRaw(@"
+            CREATE TABLE IF NOT EXISTS AiAnalyses (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                NewsItemId INTEGER NOT NULL UNIQUE,
+                Sentiment TEXT NOT NULL DEFAULT '',
+                SentimentScore REAL NOT NULL DEFAULT 0,
+                Summary TEXT NOT NULL DEFAULT '',
+                Entities TEXT NOT NULL DEFAULT '',
+                Topics TEXT NOT NULL DEFAULT '',
+                MarketImpact TEXT NOT NULL DEFAULT '',
+                AnalyzedAtUtc TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY (NewsItemId) REFERENCES News(Id)
+            );
+        ");
+        db.Database.ExecuteSqlRaw("CREATE INDEX IF NOT EXISTS IX_AiAnalyses_NewsItemId ON AiAnalyses(NewsItemId);");
+        db.Database.ExecuteSqlRaw("CREATE INDEX IF NOT EXISTS IX_AiAnalyses_Sentiment ON AiAnalyses(Sentiment);");
+        db.Database.ExecuteSqlRaw("CREATE INDEX IF NOT EXISTS IX_AiAnalyses_MarketImpact ON AiAnalyses(MarketImpact);");
+
+        db.Database.ExecuteSqlRaw(@"
+            CREATE TABLE IF NOT EXISTS AiDailyBriefings (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                Date TEXT NOT NULL UNIQUE DEFAULT '',
+                Summary TEXT NOT NULL DEFAULT '',
+                KeyThemes TEXT NOT NULL DEFAULT '',
+                MarketOutlook TEXT NOT NULL DEFAULT '',
+                TopMovers TEXT NOT NULL DEFAULT '',
+                RiskFactors TEXT NOT NULL DEFAULT '',
+                GeneratedAtUtc TEXT NOT NULL DEFAULT ''
+            );
+        ");
+        db.Database.ExecuteSqlRaw("CREATE INDEX IF NOT EXISTS IX_AiDailyBriefings_Date ON AiDailyBriefings(Date);");
     }
 
     private NewsDbContext CreateContext() => new(_dbPath);

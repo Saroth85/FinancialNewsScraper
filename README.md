@@ -37,7 +37,7 @@ Raccoglie notizie da **27+ fonti** italiane e internazionali ogni 4 ore, le salv
 │                                                                        │
 │  ┌─────────────────┐   ┌──────────────┐   ┌────────────────────────┐   │
 │  │  SCRAPING ENGINE │   │  WEB SERVER  │   │     AI ENGINE          │   │
-│  │  (ogni 4 ore)   │   │  (ASP.NET)   │   │  (1 volta al giorno)  │   │
+│  │  (ogni 4 ore)   │   │  (ASP.NET)   │   │  (loop continuo 24h)  │   │
 │  │                  │   │              │   │                        │   │
 │  │  Playwright ×20  │   │  /           │   │  Ollama + phi3         │   │
 │  │  HTML ×1         │──▶│  /archive    │   │  Sentiment analysis    │   │
